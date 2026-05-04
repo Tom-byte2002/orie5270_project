@@ -69,6 +69,7 @@ pytest
 
 ## Project Structure
 
+```text
 orie5270_project/
 ├── src/
 │   └── quant_engine/
