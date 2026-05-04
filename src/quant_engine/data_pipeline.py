@@ -4,22 +4,31 @@ import pandas as pd
 import multiprocessing as mp
 from pathlib import Path
 
-# DB connection configuration
 DB_PATH = Path("data_cache.db")
-DEFAULT_PERIOD = "2y"
+DEFAULT_PERIOD = "5y"
 
 def fetch_single_stock(ticker):
     """
     Worker function for parallel data fetching.
-    Retrieves historical OHLCV data for a given ticker.
+    Retrieves historical OHLCV data for a given ticker and normalizes its column structure.
     """
     print(f"Fetching {ticker}...")
     try:
-        data = yf.download(ticker, period=DEFAULT_PERIOD, progress=False)
+        # multi_level_index=False prevents yfinance from creating MultiIndex columns
+        data = yf.download(ticker, period=DEFAULT_PERIOD, progress=False, multi_level_index=False)
         if data.empty:
             return None
             
         data = data.reset_index()
+        
+        # Flatten MultiIndex if it still exists due to pandas/yfinance version variance
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+            
+        # Ensure 'Date' column name is properly capitalized
+        data.columns = [str(col).capitalize() if str(col).lower() == 'date' else col for col in data.columns]
+        
+        # Append ticker symbol
         data['Ticker'] = ticker
         
         # Standardize columns for database insertion
@@ -60,16 +69,19 @@ class DataManager:
         conn.commit()
         conn.close()
 
-    def fetch_and_store(self, tickers):
+    def fetch_and_store(self, tickers, use_mp=True):
         """
         Execute parallel API requests and bulk insert into local database.
         Utilizes multiprocessing pool to bypass GIL for I/O operations.
         """
-        num_cores = min(len(tickers), mp.cpu_count())
-        print(f"Starting parallel fetch with {num_cores} workers...")
-        
-        with mp.Pool(processes=num_cores) as pool:
-            results = pool.map(fetch_single_stock, tickers)
+        if use_mp:
+            num_cores = min(len(tickers), mp.cpu_count())
+            print(f"Starting parallel fetch with {num_cores} workers...")
+            with mp.Pool(processes=num_cores) as pool:
+                results = pool.map(fetch_single_stock, tickers)
+        else:
+            print("Running sequentially (Single Process Mode)...")
+            results = [fetch_single_stock(t) for t in tickers]
 
         valid_data = [df for df in results if df is not None]
 
@@ -81,7 +93,8 @@ class DataManager:
 
         print(f"Persisting {len(final_df)} records to SQLite cache...")
         conn = sqlite3.connect(self.db_path)
-        # Replace existing data to maintain a fresh cache
+        
+        # if_exists='replace' deletes the old table and ensures new correct columns are created
         final_df.to_sql('daily_prices', conn, if_exists='replace', index=False)
         conn.close()
         
